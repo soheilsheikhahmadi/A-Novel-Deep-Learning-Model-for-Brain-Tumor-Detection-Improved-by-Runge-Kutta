@@ -1,0 +1,137 @@
+import os
+import zipfile
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import tensorflow as tf
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.layers import Input, Flatten, Dropout, Dense
+from tensorflow.keras.optimizers import Adamax
+from tensorflow.keras.metrics import Precision, Recall
+from tensorflow.keras.models import Model
+
+zip_file_path = os.path.expanduser('~/Downloads/braintumor.zip')
+extract_to_path = os.path.expanduser('~/Downloads/brain_tumor_dataset')
+
+with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+    zip_ref.extractall(extract_to_path)
+
+def create_df(folder_path):
+    classes, file_paths = [], []
+    for label in os.listdir(folder_path):
+        if os.path.isdir(os.path.join(folder_path, label)):
+            for file in os.listdir(os.path.join(folder_path, label)):
+                file_paths.append(os.path.join(folder_path, label, file))
+                classes.append(label)
+    return pd.DataFrame({'Class Path': file_paths, 'Class': classes})
+
+tr_df = create_df(os.path.join(extract_to_path, 'Training'))
+ts_df = create_df(os.path.join(extract_to_path, 'Testing'))
+
+plt.figure(figsize=(8, 6))
+
+colors = ['teal', 'orange', 'purple', 'green']
+
+tr_df['Class'].value_counts().plot(kind='bar', color=colors, edgecolor='black')
+
+plt.title("Fig. 1. Percentage Distribution of Classes in the Dataset", fontsize=16, fontweight='bold')
+plt.ylabel("Number of Images", fontsize=12)
+plt.xlabel("Classes", fontsize=12)
+plt.xticks(rotation=45, fontsize=10)
+plt.yticks(fontsize=10)
+
+plt.tight_layout()
+plt.show()
+
+
+valid_df, ts_df = train_test_split(ts_df, test_size=0.5, stratify=ts_df['Class'], random_state=42)
+
+img_size = (299, 299)
+batch_size = 32
+
+datagen = ImageDataGenerator(rescale=1/255)
+tr_gen = datagen.flow_from_dataframe(tr_df, x_col='Class Path', y_col='Class', target_size=img_size, batch_size=batch_size)
+valid_gen = datagen.flow_from_dataframe(valid_df, x_col='Class Path', y_col='Class', target_size=img_size, batch_size=batch_size)
+ts_gen = datagen.flow_from_dataframe(ts_df, x_col='Class Path', y_col='Class', target_size=img_size, batch_size=batch_size, shuffle=False)
+
+base_model = tf.keras.applications.Xception(include_top=False, weights='imagenet', input_shape=(299, 299, 3), pooling='max')
+base_model.trainable = False
+
+inputs = Input(shape=(299, 299, 3))
+x = base_model(inputs)
+x = Flatten()(x)
+x = Dropout(0.3)(x)
+x = Dense(128, activation='relu')(x)
+x = Dropout(0.25)(x)
+outputs = Dense(len(tr_gen.class_indices), activation='softmax')(x)
+model = Model(inputs, outputs)
+
+model.compile(optimizer=Adamax(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy', Precision(), Recall()])
+
+history = model.fit(tr_gen, validation_data=valid_gen, epochs=20)
+
+base_model.trainable = True
+for layer in base_model.layers[:50]:
+    layer.trainable = False
+
+history_fine = model.fit(tr_gen, validation_data=valid_gen, epochs=20)
+
+model.save("brain_tumor_model.h5")
+
+plt.figure(figsize=(12, 6))
+plt.plot(history.history['loss'], label='Training Loss', color='red')
+plt.plot(history.history['val_loss'], label='Validation Loss', color='green', linestyle='--')
+plt.title("Fig. 2. Training and Validation Loss", fontsize=14, fontweight='bold')
+plt.xlabel("Epochs")
+plt.ylabel("Loss")
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.plot(history.history['accuracy'], label='Training Accuracy', color='purple')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy', color='orange', linestyle='--')
+plt.title("Fig. 3. Training and Validation Accuracy", fontsize=14, fontweight='bold')
+plt.xlabel("Epochs")
+plt.ylabel("Accuracy")
+plt.legend()
+plt.show()
+epochs = range(1, len(history.history['loss']) + 1)
+loss_df = pd.DataFrame({
+    'Epoch': epochs,
+    'Training Loss': history.history['loss'],
+    'Validation Loss': history.history['val_loss']
+})
+print(loss_df)
+
+import ace_tools as tools
+tools.display_dataframe_to_user(name="Training and Validation Loss Table", dataframe=loss_df)
+y_pred = np.argmax(model.predict(ts_gen), axis=1)
+cm = confusion_matrix(ts_gen.classes, y_pred)
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=tr_gen.class_indices.keys(), yticklabels=tr_gen.class_indices.keys())
+plt.title("Fig. 4. Confusion Matrix", fontsize=14, fontweight='bold')
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.show()
+
+report = classification_report(ts_gen.classes, y_pred, target_names=tr_gen.class_indices.keys())
+print("Classification Report:\n", report)
+
+def display_predictions(generator, predictions, class_names):
+    plt.figure(figsize=(15, 10))
+    for i in range(10):
+        plt.subplot(2, 5, i + 1)
+        img = generator[0][0][i]
+        true_label = class_names[generator[0][1][i].argmax()]
+        pred_label = class_names[predictions[i]]
+        color = 'green' if true_label == pred_label else 'red'
+        plt.imshow(img)
+        plt.title(f"True: {true_label}\nPred: {pred_label}", color=color)
+        plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+display_predictions(ts_gen, y_pred, list(tr_gen.class_indices.keys()))
